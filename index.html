@@ -1,0 +1,189 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<title>Ride Feel</title>
+<script src="https://telegram.org/js/telegram-web-app.js"></script>
+<style>
+  :root {
+    --bg: #17181a; --card: #202124; --btn: #111214; --text: #f2f2f2; --muted: #9a9ca1;
+    --line: #2c2d31; --green: #4c9a6a; --accent: #5ac57f;
+  }
+  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  html, body { margin: 0; background: var(--bg); color: var(--text);
+    font: 15px/1.35 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
+  main { max-width: 520px; margin: 0 auto; padding: 14px 12px 110px; }
+  header { display: flex; justify-content: space-between; align-items: baseline; }
+  h1 { font-size: 16px; letter-spacing: .06em; margin: 0; }
+  .ride { color: var(--muted); font-size: 13px; }
+  .steps { display: flex; gap: 6px; margin: 14px 0 6px; }
+  .steps div { flex: 1; height: 5px; border-radius: 3px; background: var(--line); }
+  .steps div.done { background: var(--green); }
+  .steps div.now { background: var(--accent); }
+  .phase { display: flex; justify-content: space-between; align-items: center; margin: 8px 0 2px; }
+  .phase h2 { font-size: 18px; margin: 0; }
+  .copy { background: none; border: 1px solid var(--line); color: var(--muted); border-radius: 8px;
+    padding: 6px 10px; font-size: 13px; }
+  .hint { color: var(--muted); font-size: 13px; margin: 0 0 8px; }
+  .zone { padding: 10px 0 6px; border-top: 1px solid var(--line); }
+  .zone:first-of-type { border-top: 0; }
+  .zrow { display: flex; justify-content: space-between; align-items: center; margin-bottom: 7px; }
+  .zname { font-weight: 600; }
+  .zval { font-weight: 700; font-size: 20px; min-width: 2.5ch; text-align: right; color: var(--muted); }
+  .skip { background: none; border: 0; color: var(--muted); font-size: 12px; text-decoration: underline; margin-right: 10px; }
+  .vals { display: grid; grid-template-columns: repeat(11, 1fr); gap: 3px; }
+  .vals button { height: 38px; border: 0; border-radius: 7px; background: var(--btn); color: var(--text);
+    font-size: 13px; font-weight: 600; padding: 0; }
+  .vals button.sel { color: #0d0d0d; }
+  .footer { position: fixed; left: 0; right: 0; bottom: 0; background: var(--bg); border-top: 1px solid var(--line);
+    padding: 10px 12px calc(10px + env(safe-area-inset-bottom)); }
+  .footer .inner { max-width: 520px; margin: 0 auto; display: flex; gap: 8px; }
+  .footer button { flex: 1; height: 48px; border-radius: 24px; border: 0; font-size: 16px; font-weight: 600; }
+  .primary { background: #f2f2f2; color: #111; }
+  .primary:disabled { background: #3a3b3f; color: #777; }
+  .secondary { background: var(--card); color: var(--text); flex: 0 0 34% !important; }
+  table { width: 100%; border-collapse: collapse; margin-top: 8px; }
+  th, td { padding: 9px 4px; text-align: center; border-bottom: 1px solid var(--line); }
+  th:first-child, td:first-child { text-align: left; }
+  td.v { font-weight: 700; border-radius: 6px; }
+  .editrow button { background: none; border: 0; color: var(--accent); font-size: 13px; padding: 4px; }
+  .msg { margin-top: 14px; padding: 12px; border-radius: 10px; background: var(--card); font-size: 14px; overflow-wrap: anywhere; }
+  .msg.err { color: #ff8a80; }
+</style>
+</head>
+<body>
+<main id="app"></main>
+<div class="footer"><div class="inner" id="footer"></div></div>
+
+<script>
+// ===== CONFIG =====
+// The server address is not stored in this file. The bot puts it in the button link as ?api=<webhook url>.
+// ==================
+
+const ZONES = [
+  ['head', 'Head'], ['hands', 'Hands'], ['arms', 'Arms'],
+  ['torso', 'Torso'], ['legs', 'Legs'], ['feet', 'Feet'],
+];
+const PHASES = [['start', 'Start'], ['mid', 'Middle'], ['end', 'Finish']];
+const VALUES = [-5, -4, -3, -2, -1, 0, 1, 2, 3, 4, 5];
+const SKIP = 'skip';
+
+const tg = window.Telegram && window.Telegram.WebApp;
+if (tg) { tg.ready(); tg.expand(); }
+
+const params = new URLSearchParams(location.search);
+const rideKey = params.get('ride') || '';
+const rideLabel = params.get('label') || rideKey || 'test ride';
+const WEBHOOK_URL = params.get('api') || '';
+
+// scores[phase][zone] = number | 'skip' | undefined (= not answered yet)
+const scores = { start: {}, mid: {}, end: {} };
+let step = 0; // 0..2 phases, 3 = review, 4 = saved
+
+const fmt = v => v === SKIP ? '·' : v === undefined ? '–' : (v > 0 ? '+' + v : String(v));
+function colour(v) {
+  if (v === undefined || v === SKIP) return null;
+  if (v <= -4) return '#3b6fd8';
+  if (v <= -2) return '#5b8ff0';
+  if (v === -1) return '#8fb4ff';
+  if (v === 0) return '#5ac57f';
+  if (v === 1) return '#f2d35b';
+  if (v <= 3) return '#f2a34b';
+  return '#e8584a';
+}
+const haptic = () => { try { tg && tg.HapticFeedback.selectionChanged(); } catch (e) {} };
+const phaseDone = ph => ZONES.every(([z]) => scores[ph][z] !== undefined);
+
+function render() {
+  const app = document.getElementById('app');
+  const footer = document.getElementById('footer');
+  let html = `<header><h1>RIDE FEEL</h1><span class="ride">${esc(rideLabel)}</span></header>
+    <div class="steps">${PHASES.map((_, i) =>
+      `<div class="${i < step ? 'done' : i === step ? 'now' : ''}"></div>`).join('')}
+      <div class="${step >= 3 ? 'now' : ''}"></div></div>`;
+
+  if (step < 3) {
+    const [ph, label] = PHASES[step];
+    const prev = step > 0 ? PHASES[step - 1] : null;
+    html += `<div class="phase"><h2>${label}</h2>
+      ${prev ? `<button class="copy" onclick="copyPrev()">Same as ${prev[1]}</button>` : ''}</div>
+      <p class="hint">How did each part feel? −5 freezing · 0 perfect · +5 overheating</p>`;
+    for (const [z, zl] of ZONES) {
+      const v = scores[ph][z];
+      html += `<div class="zone"><div class="zrow"><span class="zname">${zl}</span>
+        <span><button class="skip" onclick="setScore('${z}','${SKIP}')">${v === SKIP ? 'skipped' : 'skip'}</button>
+        <span class="zval" style="color:${colour(v) || 'var(--muted)'}">${fmt(v)}</span></span></div>
+        <div class="vals">${VALUES.map(n => {
+          const sel = v === n, c = colour(n);
+          return `<button class="${sel ? 'sel' : ''}" style="${sel ? `background:${c}` : `color:${c}`}"
+            onclick="setScore('${z}',${n})">${n > 0 ? '+' + n : n}</button>`;
+        }).join('')}</div></div>`;
+    }
+    const left = ZONES.filter(([z]) => scores[ph][z] === undefined).length;
+    const next = step < 2 ? `Next: ${PHASES[step + 1][1]}` : 'Review';
+    footer.innerHTML = (step > 0 ? `<button class="secondary" onclick="go(${step - 1})">Back</button>` : '') +
+      `<button class="primary" ${left ? 'disabled' : ''} onclick="go(${step + 1})">${left ? `${left} zone${left > 1 ? 's' : ''} left` : next}</button>`;
+  } else if (step === 3) {
+    html += `<div class="phase"><h2>Review</h2></div>
+      <table><tr><th></th>${PHASES.map(([, l]) => `<th>${l}</th>`).join('')}</tr>
+      ${ZONES.map(([z, zl]) => `<tr><td>${zl}</td>${PHASES.map(([ph]) => {
+        const v = scores[ph][z], c = colour(v);
+        return `<td class="v" style="color:${c || 'var(--muted)'}">${fmt(v)}</td>`;
+      }).join('')}</tr>`).join('')}
+      <tr class="editrow"><td></td>${PHASES.map((_, i) => `<td><button onclick="go(${i})">Edit</button></td>`).join('')}</tr>
+      </table><div id="status"></div>`;
+    footer.innerHTML = `<button class="secondary" onclick="go(2)">Back</button>
+      <button class="primary" id="save" onclick="save()">Save ride</button>`;
+  } else {
+    html += `<div class="msg">Saved. You can close this window.</div>`;
+    footer.innerHTML = `<button class="primary" onclick="tg ? tg.close() : null">Close</button>`;
+  }
+  app.innerHTML = html;
+}
+
+function setScore(z, v) { scores[PHASES[step][0]][z] = v; haptic(); render(); }
+function copyPrev() {
+  const from = PHASES[step - 1][0], to = PHASES[step][0];
+  for (const [z] of ZONES) scores[to][z] = scores[from][z];
+  haptic(); render();
+}
+function go(s) { step = s; window.scrollTo(0, 0); render(); }
+
+async function save() {
+  const btn = document.getElementById('save'), status = document.getElementById('status');
+  const out = {};
+  for (const [ph] of PHASES) for (const [z] of ZONES) {
+    const v = scores[ph][z];
+    out[`${z}_${ph}`] = (v === SKIP || v === undefined) ? null : v;
+  }
+  const body = { ride_key: rideKey, scores: out, initData: tg ? tg.initData : '' };
+  if (!rideKey || !body.initData) {
+    status.innerHTML = `<div class="msg err">Test mode: not opened from the bot, so nothing was saved.<br><small>${esc(JSON.stringify(out))}</small></div>`;
+    return;
+  }
+  if (!/^https:\/\//.test(WEBHOOK_URL)) {
+    status.innerHTML = `<div class="msg err">No server address in this link. Open the form from the latest ride message in the bot.</div>`;
+    return;
+  }
+  btn.disabled = true; btn.textContent = 'Saving…';
+  try {
+    const r = await fetch(WEBHOOK_URL, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'ngrok-skip-browser-warning': '1' },
+      body: JSON.stringify(body),
+    });
+    if (!r.ok) throw new Error('Server replied ' + r.status);
+    go(4);
+    setTimeout(() => tg && tg.close(), 1200);
+  } catch (e) {
+    btn.disabled = false; btn.textContent = 'Try again';
+    status.innerHTML = `<div class="msg err">Not saved: ${esc(e.message)}. Is n8n running on the Mac?</div>`;
+  }
+}
+function esc(s) { return String(s).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c])); }
+
+render();
+</script>
+</body>
+</html>
